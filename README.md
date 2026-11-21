@@ -45,16 +45,54 @@ sealed_auction/
   auction.py     拍卖服务：投标/修订/撤销/冻结结标/结算/复读/解释
   clearing.py    跨模块编排、对账单
   reconcile.py   仅从原始事件独立重算账户与获配
-examples/run_demo.py   从入金到结标清算的复跑入口
-tests/test_scenarios.py 16 个场景测试
+  ilp.py         纯 Python 精确整数可行性求解（两阶段单纯形 + 分支定界）
+  research.py    研究/复核层：反事实竞拍菜单、单一估值表、最小费用移交
+examples/run_demo.py       从入金到结标清算的复跑入口
+examples/run_research.py   24 轮 / 6 类展品的复核演示（只读冻结快照）
+tests/test_scenarios.py    16 个场景测试
+tests/test_research.py     17 个复核层测试（含求解器对拍）
 ```
+
+## 研究复核层（`research.py`）
+
+采购研究组对密封拍卖历史场次做**只读**复核，完全不触碰真实结算与银行账户
+（`settle`、`ledger_events`、`holds` 均不变；唯一写入落在 `research_*` 表）。
+
+**反事实竞拍菜单。** 一个观察轮里参与人只会提交一个备选标的（也可不投）。
+对每个备选，用**该场其他买家的冻结投标**、部分成交规则、`bid_id` 升序破同、
+统一价规则重新整场清算，得到「若独自替换原标」的真实获配数与实付金额。
+绝不沿用今日成交价（插入新标可能改变统一价）。不同备选**各自**反事实取代
+同一原标，冻结额不叠加。可选性按该备选当时本人**实际能获得的有效担保**判定：
+担保不足则该备选不可签，且不产生估值约束。
+
+- `build_bid_menu(archive, source)` — 全部轮 × 全部备选的菜单；
+- `explain_alternative(archive, source, round_id, alt_id)` — 单备选：不可签原因、
+  获配件数、实际花费。
+
+**同一张整数估值表。** 每种展品每件估值落在声明区间 `[lo, hi]` 内，选择使
+`Σ(各类实际获配数 × 估值) − 当轮实付` 最大，同分任选，不投得 0。每轮给出一组
+线性不等式；`find_valuation_table` 用精确整数可行性求解：
+
+- 可行 → 返回一张表，`verify_table` 逐轮给出「胜过所有合法备选」的核算；
+- 不可行 → `find_round_core` 给出**冲突轮核**（任何解都必须从中剔除至少一轮），
+  `round_constraints` 逐条列出是哪两个选择迫使矛盾。
+
+**最低费用人工移交。** `min_cost_handoff` 在受保护轮次（`protected=True`）永不
+移交的约束下，求可复查轮次的最便宜子集，使剩余全部由同一张表解释，并列出该表
+与逐轮核算、以及出现过的冲突轮核。
+
+**后续更正。** `Archive.revised_copy()` + `correct_collateral(round, alt, cents)`
+只改研究版对应轮的担保事实（版本号 +1），其余轮版本不变，冻结原件保持不可解释。
+单位总获配相同也不得复用另一场的备选可行集：可行集按备选所在场次独立重算。
 
 ## 复跑
 
 ```bash
 python3 -m unittest tests.test_scenarios -v
+python3 -m unittest tests.test_research -v
 python3 -m examples.run_demo                       # 临时库
 python3 -m examples.run_demo --db demo.sqlite3     # 持久库；多次运行自动命名空间隔离
+python3 -m examples.run_research                   # 真实结标 + 复核演示
 ```
 
 演示逐步打印：
